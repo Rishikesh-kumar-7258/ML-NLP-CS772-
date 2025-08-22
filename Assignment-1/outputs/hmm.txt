@@ -1,5 +1,5 @@
 [INFO] Training new HMM model...
-[INFO] Model saved at outputs/hmm_model.npz
+[INFO] Model saved at outputs/hmm_model.pkl
 
 ===== Supervised HMM =====
 Overall Precision: 0.875

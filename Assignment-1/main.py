@@ -15,7 +15,7 @@ def get_training_data():
 
 def train_hmm(log_file="outputs/hmm.txt", bypass=False):
 
-    file_path = "outputs/hmm_model.npz"
+    file_path = "outputs/hmm_model.pkl"
     if not bypass and os.path.exists(file_path):
         print("[INFO] Loading saved model...")
         hmm_sup = HiddenMarkovModel.load(file_path)
