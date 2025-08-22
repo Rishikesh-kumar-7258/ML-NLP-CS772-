@@ -46,7 +46,7 @@ def prepare_brown_data(min_freq: int = 3):
         X.append(x)
         Y.append(y)
 
-    print(f"Vocab size: {len(vocab)}, #Tags: {len(tags)}, #Sentences: {len(X)}")
+    # print(f"Vocab size: {len(vocab)}, #Tags: {len(tags)}, #Sentences: {len(X)}")
     return X, Y, word2idx, idx2word, tag2idx, idx2tag
 
 # =========================
@@ -92,7 +92,7 @@ def evaluate(model, X_dev, Y_dev, idx2tag, title="Model"):
     report = classification_report(y_true, y_pred, digits=3, output_dict=True, zero_division=0)
     # print(report)
     report_df = pd.DataFrame(report)
-    print(report_df)
+    print(report_df.T)
 
     cm = confusion_matrix(y_true, y_pred)
     disp = ConfusionMatrixDisplay(confusion_matrix=cm, display_labels=idx2tag.values())

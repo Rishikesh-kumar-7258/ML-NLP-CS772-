@@ -1,23 +1,31 @@
 import numpy as np
-from typing import Tuple, List, Dict, Iterable
+from typing import Tuple, List, Dict
 from tqdm import tqdm
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import precision_recall_fscore_support, classification_report
-import matplotlib.pyplot as plt
-
+from nltk import word_tokenize
+import pickle
 
 # =========================
 # HMM with two training modes
 # =========================
 class HiddenMarkovModel:
-    def __init__(self, N: int, T: int, init: str = "uniform", seed: int = 42):
+    def __init__(self, N: int, T: int, index2word: Dict[int, str], word2index: Dict[str, int], index2tag: Dict[int, str], tag2index: Dict[str, int], init: str = "uniform", seed: int = 42):
         """
         N: number of hidden states
         T: number of observation symbols (vocab size)
+        index2word: mapping from index to word
+        word2index: mapping from word to index
+        index2tag: mapping from index to tag
+        tag2index: mapping from tag to index
         init: "uniform" or "dirichlet" (random)
         """
         self.N = int(N)
         self.T = int(T)
+        self.index2word = index2word
+        self.word2index = word2index
+        self.index2tag = index2tag
+        self.tag2index = tag2index
         rng = np.random.default_rng(seed)
 
         if init == "dirichlet":
@@ -29,23 +37,16 @@ class HiddenMarkovModel:
             self.A  = np.ones((self.N, self.N), dtype=np.float32) / self.N
             self.B  = np.ones((self.N, self.T), dtype=np.float32) / self.T
 
-    def save(self, filepath: str) -> None:
-        """
-        Save the model parameters to a file.
-        """
-        np.savez_compressed(filepath, pi=self.pi, A=self.A, B=self.B)
+     # 🔹 Save full object
+    def save(self, filepath):
+        with open(filepath, "wb") as f:
+            pickle.dump(self, f)
 
+    # 🔹 Load full object
     @classmethod
-    def load(cls, filepath: str) -> "HiddenMarkovModel":
-        """
-        Load the model parameters from a file.
-        """
-        data = np.load(filepath)
-        model = cls(N=data["A"].shape[0], T=data["B"].shape[1])
-        model.pi = data["pi"]
-        model.A = data["A"]
-        model.B = data["B"]
-        return model
+    def load(cls, filepath):
+        with open(filepath, "rb") as f:
+            return pickle.load(f)
 
     # --------- Forward / Backward / Viterbi ----------
     def forward(self, O: np.ndarray) -> Tuple[np.ndarray, float]:
@@ -162,6 +163,16 @@ class HiddenMarkovModel:
     # --------- Utility ----------
     def predict(self, O: np.ndarray) -> Tuple[np.ndarray, float]:
         return self.viterbi(O)
+
+    def predict_raw(self, raw: str) -> Tuple[np.ndarray, float]:
+        O = np.array([self.word2index.get(word.lower(), self.word2index["<UNK>"]) for word in word_tokenize(raw)])
+        path, prob = self.viterbi(O)
+
+        for sent, tag in zip(O, path):
+            print(f"Word: {self.index2word[sent]}, Predicted Tag: {self.index2tag[tag]}")
+
+        print("Prediction Probabilities:", prob)
+        return
 
     @staticmethod
     def _safe_row_norm(M: np.ndarray) -> np.ndarray:
