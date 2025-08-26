@@ -1,6 +1,6 @@
 import matplotlib.pyplot as plt
 from utils import evaluate, prepare_brown_data
-from models.hmm import HiddenMarkovModel
+from hmm import HiddenMarkovModel
 from sklearn.model_selection import train_test_split
 import os, sys
 import numpy as np
@@ -64,24 +64,7 @@ def train_hmm(log_file="outputs/hmm.txt", bypass=False):
 
 if __name__ == "__main__":
     
-    print("Choose model:\n1. Hidden Markov Model\n2. Encoder Decoder\n3. LLM model\n4. Exit")
-
-    model_choice = input("Enter your choice (1-4): ")
-    while model_choice not in ["1", "2", "3", "4"]:
-        print("Invalid choice. Please enter a number between 1 and 4.")
-        model_choice = input("Enter your choice (1-4): ")
-
-    if model_choice == "1":
-        model = train_hmm(bypass=False)
-    elif model_choice == "2":
-        # model = train_encoder_decoder()
-        pass
-    elif model_choice == "3":
-        # model = train_llm()
-        pass
-    elif model_choice == "4":
-        print("Exiting...")
-        sys.exit(0)
+    model = train_hmm(bypass=False)
 
     sentence = input("Enter your sentence for decoding: ")
     model.predict_raw(sentence) 

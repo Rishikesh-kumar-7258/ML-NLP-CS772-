@@ -2,7 +2,7 @@ import nltk
 from nltk.corpus import brown
 from collections import Counter
 import numpy as np
-from models.hmm import HiddenMarkovModel
+from hmm import HiddenMarkovModel
 from tqdm import tqdm
 from typing import List
 from sklearn.metrics import precision_recall_fscore_support, classification_report, confusion_matrix, ConfusionMatrixDisplay
