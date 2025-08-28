@@ -5,9 +5,6 @@ import torch
 import torch.nn as nn
 import random
 
-# -----------------------------
-# 2) Manual LSTM cell
-# -----------------------------
 class MyLSTMCell(nn.Module):
     def __init__(self, input_dim, hidden_dim):
         super().__init__()
@@ -54,10 +51,10 @@ class Encoder(nn.Module):
 # 4) Decoder (autoregressive, MT-style)
 # -----------------------------
 class Decoder(nn.Module):
-    def __init__(self, num_tags, emb_dim, hidden_dim, dropout=0.1):
+    def __init__(self, num_tags, hidden_dim, dropout=0.1):
         super().__init__()
-        self.embedding = nn.Embedding(num_tags, emb_dim, padding_idx=0)
-        self.cell = MyLSTMCell(emb_dim, hidden_dim)
+        self.num_tags = num_tags
+        self.cell = MyLSTMCell(num_tags, hidden_dim)
         self.fc_out = nn.Linear(hidden_dim, num_tags)
         self.dropout = nn.Dropout(dropout)
 
@@ -73,8 +70,11 @@ class Decoder(nn.Module):
         input_token = trg_in[:, 0]  # first input should be <SOS>
 
         for t in range(T):
-            emb = self.dropout(self.embedding(input_token))  # [B, E]
-            h, c = self.cell(emb, h, c)
+            # Convert token indices to one-hot vectors
+            one_hot = F.one_hot(input_token, num_classes=self.num_tags).float()  # [B, num_tags]
+            one_hot = self.dropout(one_hot)
+
+            h, c = self.cell(one_hot, h, c)
             logits = self.fc_out(h)  # [B, num_tags]
             logits_list.append(logits.unsqueeze(1))
 
@@ -86,6 +86,7 @@ class Decoder(nn.Module):
 
         return torch.cat(logits_list, dim=1)  # [B, T, num_tags]
 
+
 # -----------------------------
 # 5) Seq2Seq wrapper
 # -----------------------------
@@ -93,7 +94,7 @@ class Seq2SeqTagger(nn.Module):
     def __init__(self, vocab_size, tag_size, emb_dim=128, hidden_dim=256, dropout=0.1):
         super().__init__()
         self.encoder = Encoder(vocab_size, emb_dim, hidden_dim, dropout)
-        self.decoder = Decoder(tag_size, emb_dim, hidden_dim, dropout)
+        self.decoder = Decoder(tag_size, hidden_dim, dropout)
         self.tag_size = tag_size
 
     def forward(self, src, trg_in, teacher_forcing_ratio=0.5):

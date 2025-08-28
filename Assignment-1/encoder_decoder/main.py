@@ -4,6 +4,7 @@ from collections import Counter
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F # Import torch.nn.functional
 from torch.utils.data import Dataset, DataLoader
 
 from sklearn.metrics import classification_report, confusion_matrix
@@ -11,7 +12,6 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 import numpy as np
 from sklearn.metrics import accuracy_score, precision_recall_fscore_support
-from model import Encoder, Decoder, MyLSTMCell, Seq2SeqTagger
 
 # -----------------------------
 # 0) Repro + Device
@@ -118,7 +118,6 @@ class BrownPOSDataset(Dataset):
         return (torch.tensor(self.X[i], dtype=torch.long),
                 torch.tensor(self.Y_in[i], dtype=torch.long),
                 torch.tensor(self.Y_out[i], dtype=torch.long))
-    
 # -----------------------------
 # 6) Training / Evaluation utils
 # -----------------------------
@@ -163,6 +162,7 @@ def greedy_decode(model, sentence_tokens, word2idx, idx2tag, max_len, max_steps=
     PADt = 0
     SOS = 1
 
+    # Convert sentence to indices and pad
     x = [word2idx.get(w.lower(), word2idx["<UNK>"]) for w in sentence_tokens]
     x = pad_to_len(x, max_len, PADw)
     x = torch.tensor(x, dtype=torch.long, device=device).unsqueeze(0)  # [1, T]
@@ -174,17 +174,19 @@ def greedy_decode(model, sentence_tokens, word2idx, idx2tag, max_len, max_steps=
         h, c = enc_h, enc_c
         tags = []
         for t in range(max_steps):
-            emb = model.decoder.embedding(inp)
-            h, c = model.decoder.cell(emb, h, c)
+            # NEW: one-hot encode the input index instead of embedding
+            one_hot = F.one_hot(inp, num_classes=model.tag_size).float()  # [1, C]
+
+            h, c = model.decoder.cell(one_hot, h, c)
             logit = model.decoder.fc_out(h)        # [1, C]
             pred = logit.argmax(dim=1)             # [1]
             tags.append(pred.item())
-            inp = pred  # next input is previous prediction
+            inp = pred  # feed previous prediction as next input
 
-        # map indices to tags, trim to original sent length
         tags = tags[:len(sentence_tokens)]
         tags_str = [idx2tag.get(i, "UNK") for i in tags]
         return tags_str
+
 
 def evaluate_model(model, test_loader, tag2idx, idx2tag, device="cuda"):
     model.eval()
@@ -207,10 +209,6 @@ def evaluate_model(model, test_loader, tag2idx, idx2tag, device="cuda"):
 
     return y_true, y_pred
 
-
-# -----------------------------
-# 7) Main
-# -----------------------------
 def main():
     # Hyperparams
     MAX_LEN = 40
@@ -223,7 +221,7 @@ def main():
     LR = 1e-3
     TEACHER_FORCING = 0.6
     CLIP = 1.0
-    SAVE_PATH = "pos_seq2seq_manual_lstm.pt"
+    SAVE_PATH = "pos_seq2seq_new_decoder.pt"
 
     # Data
     (X_tr, Y_tr, X_va, Y_va, X_te, Y_te,
@@ -239,10 +237,16 @@ def main():
     val_loader = DataLoader(val_ds, batch_size=BATCH_SIZE, shuffle=False)
     test_loader = DataLoader(test_ds, batch_size=BATCH_SIZE, shuffle=False)
 
-    # Model
+    # Model - **CHANGE HERE**
     vocab_size = len(word2idx)
     num_tags = len(tag2idx)
-    model = Seq2SeqTagger(vocab_size, num_tags, EMB_DIM, HID_DIM, DROPOUT).to(device)
+    model = Seq2SeqTagger(
+        vocab_size=vocab_size,
+        tag_size=num_tags,
+        emb_dim=EMB_DIM,
+        hidden_dim=HID_DIM,
+        dropout=DROPOUT
+    ).to(device)
 
     criterion = nn.CrossEntropyLoss(ignore_index=tag2idx["<PAD>"])
     optimizer = torch.optim.Adam(model.parameters(), lr=LR)
@@ -253,6 +257,7 @@ def main():
 
     best_val = float("inf")
 
+    # Training loop
     for epoch in range(1, EPOCHS + 1):
         model.train()
         total_loss = 0.0
@@ -260,7 +265,10 @@ def main():
         for x, y_in, y_out in train_loader:
             x, y_in, y_out = x.to(device), y_in.to(device), y_out.to(device)
 
-            logits = model(x, y_in, teacher_forcing_ratio=TEACHER_FORCING)  # [B, T, C]
+            # **FORWARD WITH NEW DECODER**
+            logits = model(x, y_in, teacher_forcing_ratio=TEACHER_FORCING)
+            # logits: [B, T, num_tags]
+
             loss = criterion(logits.view(-1, num_tags), y_out.view(-1))
 
             optimizer.zero_grad()
@@ -272,11 +280,9 @@ def main():
 
         train_loss = total_loss / len(train_loader)
         val_loss, val_acc = evaluate(model, val_loader, criterion, tag2idx["<PAD>"])
-
         print(f"Epoch {epoch:02d} | Train Loss {train_loss:.4f} | "
               f"Val Loss {val_loss:.4f} | Val Acc {val_acc*100:.2f}%")
 
-        # Save best
         if val_loss < best_val:
             best_val = val_loss
             torch.save({
@@ -294,43 +300,34 @@ def main():
     test_loss, test_acc = evaluate(model, test_loader, criterion, tag2idx["<PAD>"])
     print(f"Test Loss {test_loss:.4f} | Test Acc {test_acc*100:.2f}%")
 
-    # Demo inference
+    # Demo
     sample = ["The", "quick", "brown", "fox", "jumps", "over", "the", "lazy", "dog", "."]
     pred_tags = greedy_decode(model, sample, word2idx, idx2tag, max_len=MAX_LEN)
     print("Sentence:", " ".join(sample))
     print("Pred POS:", pred_tags)
 
-    
+    # Metrics
     y_true, y_pred = evaluate_model(model, test_loader, tag2idx, idx2tag, device=device)
 
-    # Overall accuracy
     acc = accuracy_score(y_true, y_pred)
     print("Overall Accuracy:", acc)
-    
-    # Per-tag precision, recall, F1
+
     prec, rec, f1, support = precision_recall_fscore_support(
         y_true, y_pred, labels=list(tag2idx.values()), zero_division=0
     )
-    
-    print("\nPer-tag Scores:")
     for tag, p, r, f, s in zip(tag2idx.keys(), prec, rec, f1, support):
         print(f"{tag:10s}  P={p:.3f}  R={r:.3f}  F1={f:.3f}  Support={s}")
-    
-    # Weighted (macro/micro) scores
-    print("\nMacro F1:", np.mean(f1))
-    print("Micro F1:", f1.sum() / support.sum())
 
     cm = confusion_matrix(y_true, y_pred, labels=list(tag2idx.values()))
-
     plt.figure(figsize=(20, 18))
-    sns.heatmap(cm, annot=True, cmap="Blues",
+    sns.heatmap(cm, annot=True, fmt='d',
+                cmap="Blues",
                 xticklabels=tag2idx.keys(),
                 yticklabels=tag2idx.keys())
     plt.xlabel("Predicted")
     plt.ylabel("True")
     plt.title("POS Tagging Confusion Matrix")
     plt.show()
-
 
 if __name__ == "__main__":
     main()
