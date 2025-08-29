@@ -1,6 +1,8 @@
 import os
 import random
 from collections import Counter
+import nltk
+from nltk.corpus import brown
 
 import torch
 import torch.nn as nn
@@ -12,6 +14,7 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 import numpy as np
 from sklearn.metrics import accuracy_score, precision_recall_fscore_support
+from sklearn.model_selection import train_test_split
 
 # -----------------------------
 # 0) Repro + Device
@@ -26,8 +29,12 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 # -----------------------------
 # 1) Data: Brown (Universal tags)
 # -----------------------------
-import nltk
-from nltk.corpus import brown
+def split_brown_dataset(sentences, tags, test_size=0.1, random_state=42):
+    """Split sentences and tags into train/test sets."""
+    X_train, X_test, y_train, y_test = train_test_split(
+        sentences, tags, test_size=test_size, random_state=random_state
+    )
+    return X_train, X_test, y_train, y_test
 
 def prepare_brown(max_len=40, min_freq=1, use_universal=True):
     nltk.download("brown", quiet=True)
@@ -37,7 +44,7 @@ def prepare_brown(max_len=40, min_freq=1, use_universal=True):
     else:
         tagged_sents = brown.tagged_sents()
 
-    # sentences: list[list[str]], tags: list[list[str]]
+    # sentences and tags
     sentences = [[w for w, t in sent] for sent in tagged_sents]
     tags = [[t for w, t in sent] for sent in tagged_sents]
 
@@ -49,13 +56,14 @@ def prepare_brown(max_len=40, min_freq=1, use_universal=True):
             word2idx[w] = len(word2idx)
     idx2word = {i: w for w, i in word2idx.items()}
 
-    # tag vocab (include <PAD>, <SOS>)
+    # tag vocab (include <PAD> and <SOS>)
     tag_set = sorted({t for ts in tags for t in ts})
     tag2idx = {"<PAD>": 0, "<SOS>": 1}
     for t in tag_set:
         tag2idx[t] = len(tag2idx)
     idx2tag = {i: t for t, i in tag2idx.items()}
 
+    # encode functions
     def encode_sentence(tokens):
         return [word2idx.get(w.lower(), word2idx["<UNK>"]) for w in tokens]
 
@@ -63,27 +71,17 @@ def prepare_brown(max_len=40, min_freq=1, use_universal=True):
         return [tag2idx[t] for t in ts]
 
     # encode
-    X = [encode_sentence(s) for s in sentences]
-    Y = [encode_tags(ts) for ts in tags]
+    X_encoded = [encode_sentence(s) for s in sentences]
+    Y_encoded = [encode_tags(ts) for ts in tags]
 
-    # split (80/10/10)
-    N = len(X)
-    idxs = list(range(N))
-    random.shuffle(idxs)
-    n_train = int(0.8 * N)
-    n_val = int(0.1 * N)
-    train_idx = idxs[:n_train]
-    val_idx = idxs[n_train:n_train + n_val]
-    test_idx = idxs[n_train + n_val:]
+    # First split: train+val vs test
+    X_train_val, X_test, Y_train_val, Y_test = split_brown_dataset(X_encoded, Y_encoded, test_size=0.1)
 
-    def subset(lst, ids):
-        return [lst[i] for i in ids]
+    # Second split: train vs val (from remaining 90%)
+    X_train, X_val, Y_train, Y_val = split_brown_dataset(X_train_val, Y_train_val, test_size=0.1111)  
+    # 0.1111 ≈ 0.1 / 0.9 to get ~10% of total data for validation
 
-    X_tr, Y_tr = subset(X, train_idx), subset(Y, train_idx)
-    X_va, Y_va = subset(X, val_idx), subset(Y, val_idx)
-    X_te, Y_te = subset(X, test_idx), subset(Y, test_idx)
-
-    return (X_tr, Y_tr, X_va, Y_va, X_te, Y_te,
+    return (X_train, Y_train, X_val, Y_val, X_test, Y_test,
             word2idx, idx2word, tag2idx, idx2tag, max_len)
 
 def pad_to_len(seq, L, pad):
@@ -118,13 +116,18 @@ class BrownPOSDataset(Dataset):
         return (torch.tensor(self.X[i], dtype=torch.long),
                 torch.tensor(self.Y_in[i], dtype=torch.long),
                 torch.tensor(self.Y_out[i], dtype=torch.long))
+import torch
+import torch.nn.functional as F
+from sklearn.metrics import classification_report, accuracy_score
+from collections import defaultdict
+
 # -----------------------------
-# 6) Training / Evaluation utils
+# 6) Training / Evaluation utils (updated)
 # -----------------------------
 def token_accuracy(logits, targets, pad_idx=0):
     """
     logits: [B, T, C], targets: [B, T]
-    ignores positions where targets == pad_idx
+    returns overall token accuracy, ignores positions where targets == pad_idx
     """
     with torch.no_grad():
         preds = logits.argmax(dim=-1)  # [B, T]
@@ -133,81 +136,114 @@ def token_accuracy(logits, targets, pad_idx=0):
         total = mask.sum().item()
         return correct / max(1, total)
 
-def evaluate(model, loader, criterion, pad_idx):
+def evaluate(model, loader, criterion, pad_idx, idx2tag):
+    """
+    Evaluate model and return loss, overall token accuracy, per-tag accuracy, and classification report.
+    """
     model.eval()
     total_loss = 0.0
-    total_acc = 0.0
-    n_batches = 0
+    all_targets = []
+    all_preds = []
+
     with torch.no_grad():
         for x, y_in, y_out in loader:
             x, y_in, y_out = x.to(device), y_in.to(device), y_out.to(device)
-            logits = model(x, y_in, teacher_forcing_ratio=0.0)  # no TF at eval
+            logits = model(x, y_in, teacher_forcing_ratio=0.0)
             loss = criterion(logits.view(-1, model.tag_size), y_out.view(-1))
-            acc = token_accuracy(logits, y_out, pad_idx)
             total_loss += loss.item()
-            total_acc += acc
-            n_batches += 1
-    return total_loss / n_batches, total_acc / n_batches
+
+            preds = logits.argmax(dim=-1)
+            mask = (y_out != pad_idx)
+            for b in range(x.size(0)):
+                for t in range(x.size(1)):
+                    if mask[b, t]:
+                        all_targets.append(y_out[b, t].item())
+                        all_preds.append(preds[b, t].item())
+
+    # overall accuracy
+    overall_acc = accuracy_score(all_targets, all_preds)
+
+    # classification report for per-tag metrics
+    labels = [i for i in range(len(idx2tag)) if i != pad_idx]  # tag indices excluding PAD
+    target_names = [idx2tag[i] for i in labels]
+    
+    report = classification_report(
+        all_targets,
+        all_preds,
+        labels=labels,
+        target_names=target_names,
+        zero_division=0,
+        output_dict=True
+    )
+    # extract per-tag accuracy (precision=recall=F1=accuracy for single class)
+    per_tag_acc = {tag: report[tag]['precision'] for tag in report}
+
+    return total_loss / len(loader), overall_acc, per_tag_acc, report
 
 def greedy_decode(model, sentence_tokens, word2idx, idx2tag, max_len, max_steps=None):
     """
-    sentence_tokens: list[str] (already tokenized)
-    Returns list[str] POS tags predicted.
+    Greedy decoding to predict POS tags for a single sentence.
     """
     model.eval()
     if max_steps is None:
         max_steps = max_len
 
     PADw = word2idx["<PAD>"]
-    PADt = 0
     SOS = 1
 
-    # Convert sentence to indices and pad
     x = [word2idx.get(w.lower(), word2idx["<UNK>"]) for w in sentence_tokens]
     x = pad_to_len(x, max_len, PADw)
-    x = torch.tensor(x, dtype=torch.long, device=device).unsqueeze(0)  # [1, T]
+    x = torch.tensor(x, dtype=torch.long, device=device).unsqueeze(0)
 
     with torch.no_grad():
         enc_h, enc_c = model.encoder(x)
-        # start token for decoder
-        inp = torch.tensor([SOS], dtype=torch.long, device=device)  # [1]
+        inp = torch.tensor([SOS], dtype=torch.long, device=device)
         h, c = enc_h, enc_c
         tags = []
         for t in range(max_steps):
-            # NEW: one-hot encode the input index instead of embedding
-            one_hot = F.one_hot(inp, num_classes=model.tag_size).float()  # [1, C]
-
+            one_hot = F.one_hot(inp, num_classes=model.tag_size).float()
             h, c = model.decoder.cell(one_hot, h, c)
-            logit = model.decoder.fc_out(h)        # [1, C]
-            pred = logit.argmax(dim=1)             # [1]
+            logit = model.decoder.fc_out(h)
+            pred = logit.argmax(dim=1)
             tags.append(pred.item())
-            inp = pred  # feed previous prediction as next input
-
+            inp = pred
         tags = tags[:len(sentence_tokens)]
         tags_str = [idx2tag.get(i, "UNK") for i in tags]
         return tags_str
-
 
 def evaluate_model(model, test_loader, tag2idx, idx2tag, device="cuda"):
     model.eval()
     y_true, y_pred = [], []
 
     with torch.no_grad():
-        for words, y_in, y_out in test_loader:  # unpack all 3
+        for words, y_in, y_out in test_loader:
             words, y_in, y_out = words.to(device), y_in.to(device), y_out.to(device)
-
-            # Forward pass
-            outputs = model(words, y_in)  # [batch, seq_len, num_tags]
+            outputs = model(words, y_in)
             predictions = torch.argmax(outputs, dim=-1)
-
-            # Collect predictions and labels (ignoring <PAD>)
             for i in range(words.size(0)):
                 for j in range(words.size(1)):
                     if y_out[i, j].item() != tag2idx["<PAD>"]:
                         y_true.append(y_out[i, j].item())
                         y_pred.append(predictions[i, j].item())
 
-    return y_true, y_pred
+    overall_acc = accuracy_score(y_true, y_pred)
+
+    # fix: define labels explicitly (exclude PAD)
+    labels = [i for i in range(len(idx2tag)) if i != tag2idx["<PAD>"]]
+    target_names = [idx2tag[i] for i in labels]
+
+    report = classification_report(
+        y_true,
+        y_pred,
+        labels=labels,
+        target_names=target_names,
+        zero_division=0,
+        output_dict=True
+    )
+
+    per_tag_acc = {idx2tag[i]: report[idx2tag[i]]['precision'] for i in labels}
+
+    return y_true, y_pred, per_tag_acc, report, overall_acc
 
 def main():
     # Hyperparams
@@ -217,7 +253,7 @@ def main():
     EMB_DIM = 128
     HID_DIM = 256
     DROPOUT = 0.2
-    EPOCHS = 100
+    EPOCHS = 0
     LR = 1e-3
     TEACHER_FORCING = 0.6
     CLIP = 1.0
@@ -237,7 +273,7 @@ def main():
     val_loader = DataLoader(val_ds, batch_size=BATCH_SIZE, shuffle=False)
     test_loader = DataLoader(test_ds, batch_size=BATCH_SIZE, shuffle=False)
 
-    # Model - **CHANGE HERE**
+    # Model
     vocab_size = len(word2idx)
     num_tags = len(tag2idx)
     model = Seq2SeqTagger(
@@ -265,10 +301,7 @@ def main():
         for x, y_in, y_out in train_loader:
             x, y_in, y_out = x.to(device), y_in.to(device), y_out.to(device)
 
-            # **FORWARD WITH NEW DECODER**
             logits = model(x, y_in, teacher_forcing_ratio=TEACHER_FORCING)
-            # logits: [B, T, num_tags]
-
             loss = criterion(logits.view(-1, num_tags), y_out.view(-1))
 
             optimizer.zero_grad()
@@ -279,7 +312,7 @@ def main():
             total_loss += loss.item()
 
         train_loss = total_loss / len(train_loader)
-        val_loss, val_acc = evaluate(model, val_loader, criterion, tag2idx["<PAD>"])
+        val_loss, val_acc, val_per_tag_acc, val_report = evaluate(model, val_loader, criterion, tag2idx["<PAD>"], idx2tag)
         print(f"Epoch {epoch:02d} | Train Loss {train_loss:.4f} | "
               f"Val Loss {val_loss:.4f} | Val Acc {val_acc*100:.2f}%")
 
@@ -295,28 +328,45 @@ def main():
                 }
             }, SAVE_PATH)
 
-    # Final Test
-    model.load_state_dict(torch.load(SAVE_PATH, map_location=device)["model_state"])
-    test_loss, test_acc = evaluate(model, test_loader, criterion, tag2idx["<PAD>"])
-    print(f"Test Loss {test_loss:.4f} | Test Acc {test_acc*100:.2f}%")
+    # Load best model
+    checkpoint = torch.load("/kaggle/input/pos-encoder-decoder-weights/pos_seq2seq_new_decoder.pt", map_location=device)
+    model.load_state_dict(checkpoint["model_state"])
 
-    # Demo
+    # Final Test Evaluation
+    # (model, loader, criterion, pad_idx, idx2tag)
+    test_loss, test_acc, test_per_tag_acc, test_report = evaluate(
+        model, test_loader, criterion, tag2idx["<PAD>"], idx2tag
+    )
+    
+    print(f"Test Loss {test_loss:.4f} | Test Acc {test_acc*100:.2f}%")
+    print("Per-Tag Accuracy:")
+    for tag, acc in test_per_tag_acc.items():
+        print(f"{tag:10s}: {acc*100:.2f}%")
+
+    # Demo prediction
     sample = ["The", "quick", "brown", "fox", "jumps", "over", "the", "lazy", "dog", "."]
     pred_tags = greedy_decode(model, sample, word2idx, idx2tag, max_len=MAX_LEN)
     print("Sentence:", " ".join(sample))
     print("Pred POS:", pred_tags)
 
-    # Metrics
-    y_true, y_pred = evaluate_model(model, test_loader, tag2idx, idx2tag, device=device)
-
-    acc = accuracy_score(y_true, y_pred)
-    print("Overall Accuracy:", acc)
-
-    prec, rec, f1, support = precision_recall_fscore_support(
-        y_true, y_pred, labels=list(tag2idx.values()), zero_division=0
-    )
-    for tag, p, r, f, s in zip(tag2idx.keys(), prec, rec, f1, support):
+    # Detailed Metrics
+    y_true, y_pred, per_tag_acc, report, overall_acc = evaluate_model(model, test_loader, tag2idx, idx2tag, device=device)
+    print(f"\nOverall Accuracy: {overall_acc*100:.2f}%\n")
+    print("Per-tag Precision / Recall / F1 / Support:")
+    for tag in per_tag_acc.keys():
+        p, r, f, s = report[tag]['precision'], report[tag]['recall'], report[tag]['f1-score'], report[tag]['support']
         print(f"{tag:10s}  P={p:.3f}  R={r:.3f}  F1={f:.3f}  Support={s}")
+
+    # Print aggregate metrics
+    for avg_type in ['micro avg', 'macro avg', 'weighted avg']:
+        if avg_type in report:
+            p, r, f, s = report[avg_type]['precision'], report[avg_type]['recall'], report[avg_type]['f1-score'], report[avg_type]['support']
+            print(f"{avg_type:10s}  P={p:.3f}  R={r:.3f}  F1={f:.3f}  Support={s}")
+
+    # Confusion Matrix
+    from sklearn.metrics import confusion_matrix
+    import matplotlib.pyplot as plt
+    import seaborn as sns
 
     cm = confusion_matrix(y_true, y_pred, labels=list(tag2idx.values()))
     plt.figure(figsize=(20, 18))
@@ -328,6 +378,7 @@ def main():
     plt.ylabel("True")
     plt.title("POS Tagging Confusion Matrix")
     plt.show()
+
 
 if __name__ == "__main__":
     main()
