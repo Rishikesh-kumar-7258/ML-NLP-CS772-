@@ -91,29 +91,72 @@ class HiddenMarkovModel:
         return path, max_prob
 
     # --------- Supervised training ----------
-    def fit_supervised(self, X: List[np.ndarray], Y: List[np.ndarray]) -> None:
+    def fit_supervised(self, X: list[np.ndarray], Y: list[np.ndarray]) -> None:
         """
+        Estimates MLE for pi, A, B with smoothing and skips <PAD>/<SOS> tokens.
+
         X: list of observation sequences (word indices)
         Y: list of gold state sequences (tag indices), same lengths as X
-        Estimates MLE for pi, A, B.
         """
         pi = np.zeros(self.N, dtype=np.float32)
         A  = np.zeros((self.N, self.N), dtype=np.float32)
         B  = np.zeros((self.N, self.T), dtype=np.float32)
 
+        # Define pad_idx and sos_idx from tag2index if available
+        pad_idx = self.tag2index.get("<PAD>")
+        sos_idx = self.tag2index.get("<SOS>")
+
         for x_seq, y_seq in zip(X, Y):
-            if len(y_seq) == 0: 
+            if len(y_seq) == 0:
                 continue
-            pi[y_seq[0]] += 1.0
-            for t in range(len(y_seq) - 1):
-                A[y_seq[t], y_seq[t+1]] += 1.0
+
+            # Find first valid tag index
+            start_idx = 0
+            while start_idx < len(y_seq) and y_seq[start_idx] in (pad_idx, sos_idx):
+                start_idx += 1
+            if start_idx >= len(y_seq):
+                continue
+
+            # Initial state count
+            pi[y_seq[start_idx]] += 1.0
+
+            # Transition counts
+            for t in range(start_idx, len(y_seq) - 1):
+                if y_seq[t] in (pad_idx, sos_idx) or y_seq[t + 1] in (pad_idx, sos_idx):
+                    continue
+                A[y_seq[t], y_seq[t + 1]] += 1.0
+
+            # Emission counts
             for t in range(len(y_seq)):
+                if y_seq[t] in (pad_idx, sos_idx):
+                    continue
                 B[y_seq[t], x_seq[t]] += 1.0
 
-        # Normalize with smoothing to avoid zero rows
+        # Zero out PAD/SOS rows and columns to exclude them
+        for idx in (pad_idx, sos_idx):
+            if idx is not None:
+                A[idx, :] = 0
+                A[:, idx] = 0
+                B[idx, :] = 0
+
+        # Smoothing for unseen transitions/emissions
+        smoothing = 1e-6
+        A += smoothing
+        B += smoothing
+        pi += smoothing
+
+        # Normalize
         self.pi = self._safe_row_norm(pi)
         self.A  = self._safe_row_norm(A)
         self.B  = self._safe_row_norm(B)
+
+        # Extra smoothing for unknown words
+        unk_idx = self.word2index.get("<UNK>")
+        if unk_idx is not None:
+            self.B[:, unk_idx] += 1e-6
+            self.B = self.B / self.B.sum(axis=1, keepdims=True)
+
+        print("[INFO] Supervised HMM trained.")
 
     # --------- Unsupervised training (Baum–Welch, memory-efficient) ----------
     def fit_unsupervised(self, X: List[np.ndarray], n_iters: int = 10) -> None:
@@ -165,14 +208,21 @@ class HiddenMarkovModel:
         return self.viterbi(O)
 
     def predict_raw(self, raw: str) -> Tuple[np.ndarray, float]:
-        O = np.array([self.word2index.get(word.lower(), self.word2index["<UNK>"]) for word in word_tokenize(raw)])
+        # Tokenize the input
+        tokens = word_tokenize(raw)
+
+        # Convert to indices (unknown words mapped to <UNK>)
+        O = np.array([self.word2index.get(w.lower(), self.word2index["<UNK>"]) for w in tokens])
+
+        # Viterbi decoding
         path, prob = self.viterbi(O)
 
-        for sent, tag in zip(O, path):
-            print(f"Word: {self.index2word[sent]}, Predicted Tag: {self.index2tag[tag]}")
+        # Print word → predicted tag mapping
+        for w, tag_idx in zip(tokens, path):
+            print(f"Word: {w}, Predicted Tag: {self.index2tag[int(tag_idx)]}")
 
         print("Prediction Probabilities:", prob)
-        return
+        return path, prob
 
     @staticmethod
     def _safe_row_norm(M: np.ndarray) -> np.ndarray:
