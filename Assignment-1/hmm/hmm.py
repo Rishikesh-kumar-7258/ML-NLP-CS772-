@@ -28,9 +28,14 @@ class HiddenMarkovModel:
         self.tag2index = tag2index
         rng = np.random.default_rng(seed)
 
-        self.pi = np.ones(self.N, dtype=np.float32) / self.N
-        self.A  = np.ones((self.N, self.N), dtype=np.float32) / self.N
-        self.B  = np.ones((self.N, self.T), dtype=np.float32) / self.T
+        if init == "dirichlet":
+            self.pi = rng.dirichlet(np.ones(self.N)).astype(np.float32)
+            self.A  = rng.dirichlet(np.ones(self.N), size=self.N).astype(np.float32)
+            self.B  = rng.dirichlet(np.ones(self.T), size=self.N).astype(np.float32)
+        else:
+            self.pi = np.ones(self.N, dtype=np.float32) / self.N
+            self.A  = np.ones((self.N, self.N), dtype=np.float32) / self.N
+            self.B  = np.ones((self.N, self.T), dtype=np.float32) / self.T
 
      # 🔹 Save full object
     def save(self, filepath):
