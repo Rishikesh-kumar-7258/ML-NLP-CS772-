@@ -9,12 +9,12 @@ import torch.nn as nn
 import torch.nn.functional as F # Import torch.nn.functional
 from torch.utils.data import Dataset, DataLoader
 
-from sklearn.metrics import classification_report, confusion_matrix
+from sklearn.metrics import classification_report, confusion_matrix, accuracy_score
+from sklearn.model_selection import train_test_split
 import matplotlib.pyplot as plt
 import seaborn as sns
-import numpy as np
-from sklearn.metrics import accuracy_score, precision_recall_fscore_support
-from sklearn.model_selection import train_test_split
+
+from model import Seq2SeqTagger
 
 # -----------------------------
 # 0) Repro + Device
@@ -116,10 +116,7 @@ class BrownPOSDataset(Dataset):
         return (torch.tensor(self.X[i], dtype=torch.long),
                 torch.tensor(self.Y_in[i], dtype=torch.long),
                 torch.tensor(self.Y_out[i], dtype=torch.long))
-import torch
-import torch.nn.functional as F
-from sklearn.metrics import classification_report, accuracy_score
-from collections import defaultdict
+
 
 # -----------------------------
 # 6) Training / Evaluation utils (updated)
@@ -364,9 +361,6 @@ def main():
             print(f"{avg_type:10s}  P={p:.3f}  R={r:.3f}  F1={f:.3f}  Support={s}")
 
     # Confusion Matrix
-    from sklearn.metrics import confusion_matrix
-    import matplotlib.pyplot as plt
-    import seaborn as sns
 
     cm = confusion_matrix(y_true, y_pred, labels=list(tag2idx.values()))
     plt.figure(figsize=(20, 18))
@@ -381,4 +375,28 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+
+    option = input("Enter 1 to train the model or 2 for inference: ")
+    if option == '1':
+        main()
+    elif option == '2':
+        # Load model and perform inference
+        checkpoint = torch.load("/kaggle/input/pos-encoder-decoder-weights/pos_seq2seq_new_decoder.pt", map_location=device)
+        params = checkpoint["params"]
+        model = Seq2SeqTagger(
+            vocab_size=params["vocab_size"],
+            tag_size=params["num_tags"],
+            emb_dim=params["EMB_DIM"],
+            hidden_dim=params["HID_DIM"],
+            dropout=params["DROPOUT"]
+        ).to(device)
+        model.load_state_dict(checkpoint["model_state"])
+        word2idx = checkpoint["word2idx"]
+        idx2tag = checkpoint["idx2tag"]
+
+        sample = ["The", "quick", "brown", "fox", "jumps", "over", "the", "lazy", "dog", "."]
+        pred_tags = greedy_decode(model, sample, word2idx, idx2tag, max_len=params["MAX_LEN"])
+        print("Sentence:", " ".join(sample))
+        print("Pred POS:", pred_tags)
+    else:
+        print("Invalid option. Please enter 1 or 2.")
