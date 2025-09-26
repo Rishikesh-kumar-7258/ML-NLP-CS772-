@@ -1,7 +1,7 @@
 import random
 import matplotlib.pyplot as plt
 from utils import evaluate, prepare_brown_dataset
-from hmm import HiddenMarkovModel
+from .hmm import HiddenMarkovModel
 import os, sys
 import numpy as np
 
